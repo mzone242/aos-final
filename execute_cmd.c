@@ -77,6 +77,7 @@ extern int errno;
 #include "trap.h"
 #include "pathexp.h"
 #include "hashcmd.h"
+#include <spawn.h>
 
 #if defined (COND_COMMAND)
 #  include "test.h"
@@ -178,6 +179,8 @@ static void execute_subshell_builtin_or_function PARAMS((WORD_LIST *, REDIRECT *
 						      int, int, int,
 						      struct fd_bitmap *,
 						      int));
+static int execute_hook PARAMS((WORD_LIST *, REDIRECT *, char *,
+				      int, int, int, struct fd_bitmap *, int));
 static int execute_disk_command PARAMS((WORD_LIST *, REDIRECT *, char *,
 				      int, int, int, struct fd_bitmap *, int));
 
@@ -5586,7 +5589,7 @@ setup_async_signals ()
 #endif
 
 static int
-execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
+execute_hook (words, redirects, command_line, pipe_in, pipe_out,
 		      async, fds_to_close, cmdflags)
      WORD_LIST *words;
      REDIRECT *redirects;
@@ -5628,20 +5631,16 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
      any pathname it finds into the hash table, it should read
      command = search_for_command (pathname, stdpath ? CMDSRCH_STDPATH : CMDSRCH_HASH);
   */
-  command = search_for_command (pathname, CMDSRCH_HASH|(stdpath ? CMDSRCH_STDPATH : 0));
-  QUIT;
+  command = "\0";
 
-  if (command)
-    {
       /* If we're optimizing out the fork (implicit `exec'), decrement the
 	 shell level like `exec' would do. Don't do this if we are already
 	 in a pipeline environment, assuming it's already been done. */
-      if (nofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE && (subshell_environment & SUBSHELL_PIPE) == 0)
-	adjust_shell_level (-1);
+  if (nofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE && (subshell_environment & SUBSHELL_PIPE) == 0)
+	  adjust_shell_level (-1);
 
-      maybe_make_export_env ();
-      put_command_name_into_env (command);
-    }
+  maybe_make_export_env ();
+  put_command_name_into_env (command);
 
   /* We have to make the child before we check for the non-existence
      of COMMAND, since we want the error messages to be redirected. */
@@ -5721,8 +5720,6 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
       if (async)
 	interactive = old_interactive;
 
-      if (command == 0)
-	{
 	  hookf = find_function (NOTFOUND_HOOK);
 	  if (hookf == 0)
 	    {
@@ -5743,7 +5740,160 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 
 	  wl = make_word_list (make_word (NOTFOUND_HOOK), words);
 	  exit (execute_shell_function (hookf, wl));
+    }
+  else
+    {
+parent_return:
+      QUIT;
+
+      /* Make sure that the pipes are closed in the parent. */
+      close_pipes (pipe_in, pipe_out);
+#if defined (PROCESS_SUBSTITUTION) && defined (HAVE_DEV_FD)
+#if 0
+      if (variable_context == 0)
+        unlink_fifo_list ();
+#endif
+#endif
+      return (result);
+    }
+}
+
+static int
+execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
+		      async, fds_to_close, cmdflags)
+     WORD_LIST *words;
+     REDIRECT *redirects;
+     char *command_line;
+     int pipe_in, pipe_out, async;
+     struct fd_bitmap *fds_to_close;
+     int cmdflags;
+{
+  char *pathname, *command, **args, *p;
+  int nofork, stdpath, result, fork_flags;
+  pid_t pid;
+  // SHELL_VAR *hookf;
+  // WORD_LIST *wl;
+
+  stdpath = (cmdflags & CMD_STDPATH);	/* use command -p path */
+  nofork = (cmdflags & CMD_NO_FORK);	/* Don't fork, just exec, if no pipes */
+  pathname = words->word->word;
+
+  p = 0;
+  result = EXECUTION_SUCCESS;
+#if defined (RESTRICTED_SHELL)
+  command = (char *)NULL;
+  if (restricted && mbschr (pathname, '/'))
+    {
+      internal_error (_("%s: restricted: cannot specify `/' in command names"),
+		    pathname);
+      result = last_command_exit_value = EXECUTION_FAILURE;
+
+      /* If we're not going to fork below, we must already be in a child
+         process or a context in which it's safe to call exit(2).  */
+      if (nofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE)
+	exit (last_command_exit_value);
+      else
+	goto parent_return;
+    }
+#endif /* RESTRICTED_SHELL */
+
+  /* If we want to change this so `command -p' (CMD_STDPATH) does not insert
+     any pathname it finds into the hash table, it should read
+     command = search_for_command (pathname, stdpath ? CMDSRCH_STDPATH : CMDSRCH_HASH);
+  */
+  command = search_for_command (pathname, CMDSRCH_HASH|(stdpath ? CMDSRCH_STDPATH : 0));
+  QUIT;
+
+  if (command == 0)
+    {
+      /* Special case for shell function */
+      execute_hook(words, redirects, command_line, pipe_in, pipe_out, async, fds_to_close, cmdflags);
+      FREE (command);
+      return (result);
+    }
+
+  if (command)
+    {
+      /* If we're optimizing out the fork (implicit `exec'), decrement the
+	 shell level like `exec' would do. Don't do this if we are already
+	 in a pipeline environment, assuming it's already been done. */
+      if (nofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE && (subshell_environment & SUBSHELL_PIPE) == 0)
+	adjust_shell_level (-1);
+
+      maybe_make_export_env ();
+      put_command_name_into_env (command);
+    }
+
+  /* We have to make the child before we check for the non-existence
+     of COMMAND, since we want the error messages to be redirected. */
+  /* If we can get away without forking and there are no pipes to deal with,
+     don't bother to fork, just directly exec the command. */
+  if (nofork && pipe_in == NO_PIPE && pipe_out == NO_PIPE)
+    {
+      /* Special case for implicit exec */
+      int old_interactive;
+
+      reset_terminating_signals ();	/* XXX */
+      /* Cancel traps, in trap.c. */
+      restore_original_signals ();
+      subshell_environment &= ~SUBSHELL_IGNTRAP;
+
+#if defined (JOB_CONTROL)
+      FREE (p);
+#endif
+
+      /* restore_original_signals may have undone the work done
+	 by make_child to ensure that SIGINT and SIGQUIT are ignored
+	 in asynchronous children. */
+      if (async)
+	{
+	  if ((cmdflags & CMD_STDIN_REDIR) &&
+		pipe_in == NO_PIPE &&
+		(stdin_redirects (redirects) == 0))
+	    async_redirect_stdin ();
+	  setup_async_signals ();
 	}
+
+      /* This functionality is now provided by close-on-exec of the
+	 file descriptors manipulated by redirection and piping.
+	 Some file descriptors still need to be closed in all children
+	 because of the way bash does pipes; fds_to_close is a
+	 bitmap of all such file descriptors. */
+      if (fds_to_close)
+	close_fd_bitmap (fds_to_close);
+
+      do_piping (pipe_in, pipe_out);
+
+      old_interactive = interactive;
+      if (async)
+	interactive = 0;
+
+      subshell_environment |= SUBSHELL_FORK;	/* XXX - was just = */
+
+#if defined (PROCESS_SUBSTITUTION) && !defined (HAVE_DEV_FD)
+      clear_fifo_list ();	/* XXX - we haven't created any FIFOs */
+#endif
+
+      /* reset shell_pgrp to pipeline_pgrp here for word expansions performed
+         by the redirections here? */
+      if (redirects && (do_redirections (redirects, RX_ACTIVE) != 0))
+	{
+#if defined (PROCESS_SUBSTITUTION)
+	  /* Try to remove named pipes that may have been created as the
+	     result of redirections. */
+	  unlink_all_fifos ();
+#endif /* PROCESS_SUBSTITUTION */
+	  exit (EXECUTION_FAILURE);
+	}
+
+#if defined (PROCESS_SUBSTITUTION) && !defined (HAVE_DEV_FD)
+      /* This should only contain FIFOs created as part of redirection
+	 expansion. */
+      unlink_all_fifos ();
+#endif
+
+      if (async)
+	interactive = old_interactive;
 
       /* Execve expects the command name to be in args[0].  So we
 	 leave it there, in the same format that the user used to
@@ -5753,6 +5903,182 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
     }
   else
     {
+      // posix_spawn starts here
+      posix_spawn_file_actions_t action;
+      posix_spawnattr_t attr;
+      short flags = 0;
+      flags |= POSIX_SPAWN_SETSIGMASK;
+      flags |= POSIX_SPAWN_SETSIGDEF;
+
+      if (posix_spawn_file_actions_init(&action) != 0)
+  sys_error(_("posix_spawn_file_actions_init: %s"), strerror(errno));
+
+      if (posix_spawnattr_init(&attr) != 0)
+  sys_error(_("posix_spawnattr_init: %s"), strerror(errno));
+
+      fork_flags = async ? FORK_ASYNC : 0;
+      // pid = make_child (p = savestring (command_line), fork_flags);
+
+      // CLRINTERRUPT;	/* XXX - children have their own interrupt state */
+
+      /* Restore top-level signal mask. */
+#if defined (JOB_CONTROL) || defined (HAVE_POSIX_SIGNALS)
+  sigprocmask (SIG_SETMASK, &top_level_mask, (sigset_t *)NULL);
+#endif
+
+#if 0
+      /* Ignore INT and QUIT in asynchronous children. */
+      if (async_p)
+	last_asynchronous_pid = getpid ();
+#endif
+
+      subshell_environment |= SUBSHELL_IGNTRAP;
+
+#if defined (SIGTSTP)
+  if (signal_is_trapped (SIGTSTP) == 0 && signal_is_hard_ignored (SIGTSTP))
+    set_signal_handler (SIGTSTP, SIG_IGN);
+  else
+    set_signal_handler (SIGTSTP, SIG_DFL);
+  if (signal_is_trapped (SIGTTIN) == 0 && signal_is_hard_ignored (SIGTTIN))
+    set_signal_handler (SIGTTIN, SIG_IGN);
+  else
+    set_signal_handler (SIGTTIN, SIG_DFL);
+  if (signal_is_trapped (SIGTTOU) == 0 && signal_is_hard_ignored (SIGTTOU))
+    set_signal_handler (SIGTTOU, SIG_IGN);
+  else
+    set_signal_handler (SIGTTOU, SIG_DFL);
+#endif
+
+      int old_interactive;
+
+      // Not fully handling signals for now
+      // reset_terminating_signals ();	/* XXX */
+      /* Cancel traps, in trap.c. */
+      // restore_original_signals ();
+      subshell_environment &= ~SUBSHELL_IGNTRAP;
+
+#if defined (JOB_CONTROL)
+      FREE (p);
+#endif
+
+      /* restore_original_signals may have undone the work done
+	 by make_child to ensure that SIGINT and SIGQUIT are ignored
+	 in asynchronous children. */
+      if (async)
+	{
+	  if ((cmdflags & CMD_STDIN_REDIR) &&
+		pipe_in == NO_PIPE &&
+		(stdin_redirects (redirects) == 0))
+    {
+	    async_redirect_stdin ();
+
+  // int fd;
+
+  // fd = open ("/dev/null", O_RDONLY);
+  // if (fd > 0)
+  //   {
+  //     dup2 (fd, 0);
+  //     close (fd);
+  //   }
+  // else if (fd < 0)
+  //   internal_error (_("cannot redirect standard input from /dev/null: %s"), strerror (errno));
+    }
+    // Can't set sigignore explicitly, so don't
+	  // setup_async_signals ();
+	}
+
+      /* This functionality is now provided by close-on-exec of the
+	 file descriptors manipulated by redirection and piping.
+	 Some file descriptors still need to be closed in all children
+	 because of the way bash does pipes; fds_to_close is a
+	 bitmap of all such file descriptors. */
+      if (fds_to_close)
+	close_fd_bitmap (fds_to_close);
+  // {
+
+  // register int i;
+
+  // if (fdbp)
+  //   {
+  //     for (i = 0; i < fdbp->size; i++)
+	// if (fdbp->bitmap[i])
+	//   {
+	//     close (i);
+	//     fdbp->bitmap[i] = 0;
+	//   }
+  //   }
+  // }
+
+      do_piping (pipe_in, pipe_out);
+      
+  //      if (pipe_in != NO_PIPE)
+  //   {
+  //     if (dup2 (pipe_in, 0) < 0)
+	// dup_error (pipe_in, 0);
+  //     if (pipe_in > 0)
+	// close (pipe_in);
+  // if (pipe_out != NO_PIPE)
+  //   {
+  //     if (pipe_out != REDIRECT_BOTH)
+	// {
+	//   if (dup2 (pipe_out, 1) < 0)
+	//     dup_error (pipe_out, 1);
+	//   if (pipe_out == 0 || pipe_out > 1)
+	//     close (pipe_out);
+	// }
+  //     else
+	// {
+	//   if (dup2 (1, 2) < 0)
+	//     dup_error (1, 2);
+	// }
+
+      old_interactive = interactive;
+      if (async)
+	interactive = 0;
+
+  //     subshell_environment |= SUBSHELL_FORK;	/* XXX - was just = */
+
+#if defined (PROCESS_SUBSTITUTION) && !defined (HAVE_DEV_FD)
+      clear_fifo_list ();	/* XXX - we haven't created any FIFOs */
+#endif
+
+      /* Redirects are really complicated so not supporting for now */
+      /* reset shell_pgrp to pipeline_pgrp here for word expansions performed
+         by the redirections here? */
+//       if (redirects && (do_redirections (redirects, RX_ACTIVE) != 0))
+// 	{
+// #if defined (PROCESS_SUBSTITUTION)
+// 	  /* Try to remove named pipes that may have been created as the
+// 	     result of redirections. */
+// 	  unlink_all_fifos ();
+// #endif /* PROCESS_SUBSTITUTION */
+// 	  exit (EXECUTION_FAILURE);
+// 	}
+
+#if defined (PROCESS_SUBSTITUTION) && !defined (HAVE_DEV_FD)
+      /* This should only contain FIFOs created as part of redirection
+	 expansion. */
+      unlink_all_fifos ();
+#endif
+
+      if (async)
+	interactive = old_interactive;
+
+      /* Execve expects the command name to be in args[0].  So we
+	 leave it there, in the same format that the user used to
+	 type it in. */
+      args = strvec_from_word_list (words, 0, 0, (int *)NULL);
+      // exit (shell_execve (command, args, export_env));
+      err = posix_spawn(&pid, command, NULL, NULL, args, export_env);
+      if (err != 0)
+  {
+      // is this useful?
+      sys_error ("Error posix_spawn");
+      last_command_exit_value = EX_NOEXEC;
+      throw_to_top_level ();
+      // fprintf(stderr, "Error posix_spawn, errno: %s\n", strerror(err));
+      // exit(1);
+  }
 parent_return:
       QUIT;
 
