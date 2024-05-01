@@ -5909,6 +5909,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
       short flags = 0;
       flags |= POSIX_SPAWN_SETSIGMASK;
       flags |= POSIX_SPAWN_SETSIGDEF;
+      int err;
 
       if (posix_spawn_file_actions_init(&action) != 0)
   sys_error(_("posix_spawn_file_actions_init: %s"), strerror(errno));
@@ -5922,6 +5923,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
       // CLRINTERRUPT;	/* XXX - children have their own interrupt state */
 
       /* Restore top-level signal mask. */
+      /* Might need to do this in sig.c */
 #if defined (JOB_CONTROL) || defined (HAVE_POSIX_SIGNALS)
   sigprocmask (SIG_SETMASK, &top_level_mask, (sigset_t *)NULL);
 #endif
@@ -5934,19 +5936,22 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 
       subshell_environment |= SUBSHELL_IGNTRAP;
 
+
 #if defined (SIGTSTP)
-  if (signal_is_trapped (SIGTSTP) == 0 && signal_is_hard_ignored (SIGTSTP))
-    set_signal_handler (SIGTSTP, SIG_IGN);
-  else
-    set_signal_handler (SIGTSTP, SIG_DFL);
-  if (signal_is_trapped (SIGTTIN) == 0 && signal_is_hard_ignored (SIGTTIN))
-    set_signal_handler (SIGTTIN, SIG_IGN);
-  else
-    set_signal_handler (SIGTTIN, SIG_DFL);
-  if (signal_is_trapped (SIGTTOU) == 0 && signal_is_hard_ignored (SIGTTOU))
-    set_signal_handler (SIGTTOU, SIG_IGN);
-  else
-    set_signal_handler (SIGTTOU, SIG_DFL);
+      sigset_t sset;
+      sigemptyset(&sset);
+  if (!(signal_is_trapped (SIGTSTP) == 0 && signal_is_hard_ignored (SIGTSTP)))
+    sigaddset(&sset, SIGTSTP);
+  if (!(signal_is_trapped (SIGTTIN) == 0 && signal_is_hard_ignored (SIGTTIN)))
+    sigaddset(&sset, SIGTTIN);
+  if (!(signal_is_trapped (SIGTTOU) == 0 && signal_is_hard_ignored (SIGTTOU)))
+    sigaddset(&sset, SIGTTOU);
+  if (posix_spawnattr_setsigdefault(&attr, &sset) != )
+  {
+      sys_error ("Error posix_spawnattr_setsigdefault");
+      last_command_exit_value = EX_NOEXEC;
+      throw_to_top_level ();
+  }
 #endif
 
       int old_interactive;
@@ -5971,17 +5976,10 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 		(stdin_redirects (redirects) == 0))
     {
 	    async_redirect_stdin ();
-
-  // int fd;
-
-  // fd = open ("/dev/null", O_RDONLY);
-  // if (fd > 0)
-  //   {
-  //     dup2 (fd, 0);
-  //     close (fd);
-  //   }
-  // else if (fd < 0)
-  //   internal_error (_("cannot redirect standard input from /dev/null: %s"), strerror (errno));
+      if ( (err = posix_spawn_file_actions_addopen(&action, 0, "/dev/null", O_RDONLY, 0)) )
+      {
+        internal_error (_("cannot redirect standard input from /dev/null: %s"), strerror (errno));
+      }
     }
     // Can't set sigignore explicitly, so don't
 	  // setup_async_signals ();
@@ -5993,44 +5991,36 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 	 because of the way bash does pipes; fds_to_close is a
 	 bitmap of all such file descriptors. */
       if (fds_to_close)
-	close_fd_bitmap (fds_to_close);
-  // {
-
-  // register int i;
-
-  // if (fdbp)
-  //   {
-  //     for (i = 0; i < fdbp->size; i++)
-	// if (fdbp->bitmap[i])
-	//   {
-	//     close (i);
-	//     fdbp->bitmap[i] = 0;
-	//   }
-  //   }
-  // }
-
-      do_piping (pipe_in, pipe_out);
+  {
+      register int i;
+      for (i = 0; i < fdbp->size; i++)
+	if (fdbp->bitmap[i])
+	  {
+      if (posix_spawn_file_actions_addclose(&action, i) != 0)
+  internal_error (_("cannot close fd: %s"), strerror (errno));
+	    fdbp->bitmap[i] = 0;
+	  }
+  }      
       
-  //      if (pipe_in != NO_PIPE)
-  //   {
-  //     if (dup2 (pipe_in, 0) < 0)
-	// dup_error (pipe_in, 0);
-  //     if (pipe_in > 0)
-	// close (pipe_in);
-  // if (pipe_out != NO_PIPE)
-  //   {
-  //     if (pipe_out != REDIRECT_BOTH)
-	// {
-	//   if (dup2 (pipe_out, 1) < 0)
-	//     dup_error (pipe_out, 1);
-	//   if (pipe_out == 0 || pipe_out > 1)
-	//     close (pipe_out);
-	// }
-  //     else
-	// {
-	//   if (dup2 (1, 2) < 0)
-	//     dup_error (1, 2);
-	// }
+      if (pipe_in != NO_PIPE)
+    {
+      if ( (err = posix_spawn_file_actions_adddup2(&action, pipe_in, 0)) )
+	dup_error (pipe_in, 0);
+    }
+  if (pipe_out != NO_PIPE)
+    {
+      if (pipe_out != REDIRECT_BOTH)
+	{
+    if ( (err = posix_spawn_file_actions_adddup2(&action, pipe_out, 1)) )
+  {
+	dup_error (pipe_out, 1);
+	}
+      else
+	{
+    if ( (err = posix_spawn_file_actions_adddup2(&action, 1, 2)) ) 
+  dup_error (1, 2);
+	}
+    }
 
       old_interactive = interactive;
       if (async)
@@ -6079,6 +6069,23 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
       // fprintf(stderr, "Error posix_spawn, errno: %s\n", strerror(err));
       // exit(1);
   }
+
+      // /* Destroy any objects that we created earlier. */
+
+      if (attr != NULL) {
+          err = posix_spawnattr_destroy(attr);
+          if (err != 0)
+        internal_error (_("Error posix_spawnattr_destroy: %s"), strerror (errno));
+      }
+
+      if (action != NULL) {
+          err = posix_spawn_file_actions_destroy(action);
+          if (err != 0)
+        internal_error (_("Error posix_spawn_file_actions_destroy: %s"), strerror (errno));
+      }
+
+
+      /* Need to add child pid in nojobs.c */
 parent_return:
       QUIT;
 
