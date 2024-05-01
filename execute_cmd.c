@@ -6086,6 +6086,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 
 
       /* Need to add child pid in nojobs.c */
+      add_child(pid, fork_flags);
 parent_return:
       QUIT;
 

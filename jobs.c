@@ -2353,6 +2353,22 @@ make_child (command, flags)
   return (pid);
 }
 
+
+void
+add_child (pid, flags)
+      pid_t pid;
+      int flags;
+{
+  int async_p;
+  async_p = (flags & FORK_ASYNC);
+  last_made_pid = pid;
+
+      if (async_p)
+	last_asynchronous_pid = pid;
+
+      add_pid (pid, async_p);
+}
+
 /* These two functions are called only in child processes. */
 void
 ignore_tty_job_signals ()

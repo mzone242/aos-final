@@ -271,6 +271,7 @@ extern void list_stopped_jobs PARAMS((int));
 extern void list_running_jobs PARAMS((int));
 
 extern pid_t make_child PARAMS((char *, int));
+extern void add_child PARAMS((pid_t, int));
 
 extern int get_tty_state PARAMS((void));
 extern int set_tty_state PARAMS((void));
