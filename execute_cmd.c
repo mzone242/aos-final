@@ -78,6 +78,7 @@ extern int errno;
 #include "pathexp.h"
 #include "hashcmd.h"
 #include <spawn.h>
+#include <errno.h>
 
 #if defined (COND_COMMAND)
 #  include "test.h"
@@ -197,6 +198,8 @@ static int execute_pipeline PARAMS((COMMAND *, int, int, int, struct fd_bitmap *
 static int execute_connection PARAMS((COMMAND *, int, int, int, struct fd_bitmap *));
 
 static int execute_intern_function PARAMS((WORD_DESC *, FUNCTION_DEF *));
+
+static void dup_error PARAMS((int, int));
 
 /* Set to 1 if fd 0 was the subject of redirection to a subshell.  Global
    so that reader_loop can set it to zero before executing a command. */
@@ -5911,11 +5914,15 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
       flags |= POSIX_SPAWN_SETSIGDEF;
       int err;
 
-      if (posix_spawn_file_actions_init(&action) != 0)
+      if (posix_spawn_file_actions_init (&action) != 0)
   sys_error(_("posix_spawn_file_actions_init: %s"), strerror(errno));
 
-      if (posix_spawnattr_init(&attr) != 0)
+      if (posix_spawnattr_init (&attr) != 0)
   sys_error(_("posix_spawnattr_init: %s"), strerror(errno));
+
+
+      if (posix_spawnattr_setflags (&attr, flags) != 0)
+  sys_error(_("posix_spawnattr_setflags: %s"), strerror(errno));
 
       fork_flags = async ? FORK_ASYNC : 0;
       // pid = make_child (p = savestring (command_line), fork_flags);
@@ -5924,9 +5931,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 
       /* Restore top-level signal mask. */
       /* Might need to do this in sig.c */
-#if defined (JOB_CONTROL) || defined (HAVE_POSIX_SIGNALS)
-  sigprocmask (SIG_SETMASK, &top_level_mask, (sigset_t *)NULL);
-#endif
+      restore_sigmask_spawn (attr);
 
 #if 0
       /* Ignore INT and QUIT in asynchronous children. */
@@ -5946,7 +5951,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
     sigaddset(&sset, SIGTTIN);
   if (!(signal_is_trapped (SIGTTOU) == 0 && signal_is_hard_ignored (SIGTTOU)))
     sigaddset(&sset, SIGTTOU);
-  if (posix_spawnattr_setsigdefault(&attr, &sset) != )
+  if (posix_spawnattr_setsigdefault(&attr, &sset) != 0)
   {
       sys_error ("Error posix_spawnattr_setsigdefault");
       last_command_exit_value = EX_NOEXEC;
@@ -5993,12 +5998,12 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
       if (fds_to_close)
   {
       register int i;
-      for (i = 0; i < fdbp->size; i++)
-	if (fdbp->bitmap[i])
+      for (i = 0; i < fds_to_close->size; i++)
+	if (fds_to_close->bitmap[i])
 	  {
       if (posix_spawn_file_actions_addclose(&action, i) != 0)
   internal_error (_("cannot close fd: %s"), strerror (errno));
-	    fdbp->bitmap[i] = 0;
+	    fds_to_close->bitmap[i] = 0;
 	  }
   }      
       
@@ -6020,6 +6025,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
     if ( (err = posix_spawn_file_actions_adddup2(&action, 1, 2)) ) 
   dup_error (1, 2);
 	}
+  }
     }
 
       old_interactive = interactive;
@@ -6059,7 +6065,7 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 	 type it in. */
       args = strvec_from_word_list (words, 0, 0, (int *)NULL);
       // exit (shell_execve (command, args, export_env));
-      err = posix_spawn(&pid, command, NULL, NULL, args, export_env);
+      err = posix_spawn(&pid, command, &action, &attr, args, export_env);
       if (err != 0)
   {
       // is this useful?
@@ -6072,15 +6078,11 @@ execute_disk_command (words, redirects, command_line, pipe_in, pipe_out,
 
       // /* Destroy any objects that we created earlier. */
 
-      if (attr != NULL) {
-          err = posix_spawnattr_destroy(attr);
-          if (err != 0)
+      if (posix_spawnattr_destroy(&attr) != 0) {
         internal_error (_("Error posix_spawnattr_destroy: %s"), strerror (errno));
       }
 
-      if (action != NULL) {
-          err = posix_spawn_file_actions_destroy(action);
-          if (err != 0)
+      if (posix_spawn_file_actions_destroy(&action) != 0) {
         internal_error (_("Error posix_spawn_file_actions_destroy: %s"), strerror (errno));
       }
 

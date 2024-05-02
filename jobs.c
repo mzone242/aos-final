@@ -2365,8 +2365,9 @@ add_child (pid, flags)
 
       if (async_p)
 	last_asynchronous_pid = pid;
-
-      add_pid (pid, async_p);
+      
+  js.c_totforked++;
+  js.c_living++;
 }
 
 /* These two functions are called only in child processes. */

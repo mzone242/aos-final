@@ -42,6 +42,8 @@
 #include "siglist.h"
 #include "sig.h"
 #include "trap.h"
+#include <spawn.h>
+#include <errno.h>
 
 #include "builtins/common.h"
 #include "builtins/builtext.h"
@@ -484,6 +486,16 @@ restore_sigmask ()
 {
 #if defined (JOB_CONTROL) || defined (HAVE_POSIX_SIGNALS)
   sigprocmask (SIG_SETMASK, &top_level_mask, (sigset_t *)NULL);
+#endif
+}
+
+void
+restore_sigmask_spawn (attr)
+      posix_spawnattr_t attr;
+{
+#if defined (JOB_CONTROL) || defined (HAVE_POSIX_SIGNALS)
+  if (posix_spawnattr_setsigmask (&attr, &top_level_mask) != 0)
+  sys_error(_("posix_spawnattr_setsigmask: %s"), strerror(errno));
 #endif
 }
 
