@@ -2,6 +2,10 @@
 
 for i in {1..500};
 do
-    mkdir bar
-    rmdir bar
+    mkdir $i
+done
+
+for i in {1..500};
+do
+    rmdir $i
 done

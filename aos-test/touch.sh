@@ -2,6 +2,10 @@
 
 for i in {1..500};
 do
-    touch foo
-    rm foo
+    touch $i
+done
+
+for i in {1..500};
+do
+    rm $i
 done
